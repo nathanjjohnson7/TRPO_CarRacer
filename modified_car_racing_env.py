@@ -1,5 +1,16 @@
-#original car racer environment from https://github.com/Farama-Foundation/Gymnasium/blob/main/gymnasium/envs/box2d/car_racing.py
 __credits__ = ["Andrea PIERRÉ"]
+
+# Modifications:
+# - Added feature-vector output (11D) for CarRacing environment
+# - Features: (off_track_flag, speed, acceleration, angular velocity, angular acceleration,
+#    sine of car angle relative to road trajectory, cosine of car angle relative to road trajectory,
+#    distance to left edge of track, distance to center of track, distance to right edge of track,
+#    unused placeholder (always zero))
+# - Modified by Nathan, 2025
+
+#The first commit of this file is the original work from the gymnasium library
+# https://github.com/Farama-Foundation/Gymnasium/blob/main/gymnasium/envs/box2d/car_racing.py
+#To see my modifications look at the diffs from the first to the second commit of this file
 
 import math
 from typing import Optional, Union
@@ -12,6 +23,8 @@ from gymnasium.envs.box2d.car_dynamics import Car
 from gymnasium.error import DependencyNotInstalled, InvalidAction
 from gymnasium.utils import EzPickle
 
+import shapely.geometry
+from collections import deque
 
 try:
     import Box2D
@@ -266,6 +279,18 @@ class CarRacing(gym.Env, EzPickle):
         )
 
         self.render_mode = render_mode
+        
+        #used to track acceleration, angular velociy and angular acceleration
+        self.speed_over_frames = deque(maxlen=2)
+        self.speed_over_frames.append(0.0)
+        self.angle_over_frames = deque(maxlen=3)
+        #achieved will be set to a vector of length equal to number of track tiles
+        # and will be used to track covered track tiles
+        self.achieved = None
+        #track reward
+        self.my_reward = 0.0
+        #we use this to store just the vertices of track tiles, without kerbstones
+        self.track_tile_vertices = []
 
     def _destroy(self):
         if not self.road:
@@ -469,6 +494,7 @@ class CarRacing(gym.Env, EzPickle):
             t.idx = i
             t.fixtures[0].sensor = True
             self.road_poly.append(([road1_l, road1_r, road2_r, road2_l], t.color))
+            self.track_tile_vertices.append([road1_l, road1_r, road2_r, road2_l])
             self.road.append(t)
             if border[i]:
                 side = np.sign(beta2 - beta1)
@@ -516,6 +542,13 @@ class CarRacing(gym.Env, EzPickle):
         self.new_lap = False
         self.road_poly = []
 
+        self.achieved = None
+        self.my_reward = 0.0
+        self.track_tile_vertices = []
+        self.speed_over_frames = deque(maxlen=2)
+        self.speed_over_frames.append(0.0)
+        self.angle_over_frames = deque(maxlen=3)
+
         if self.domain_randomize:
             randomize = True
             if isinstance(options, dict):
@@ -549,6 +582,7 @@ class CarRacing(gym.Env, EzPickle):
                 self.car.gas(action[1])
                 self.car.brake(action[2])
             else:
+                action = int(action)
                 if not self.action_space.contains(action):
                     raise InvalidAction(
                         f"you passed the invalid action `{action}`. "
@@ -562,7 +596,8 @@ class CarRacing(gym.Env, EzPickle):
         self.world.Step(1.0 / FPS, 6 * 30, 2 * 30)
         self.t += 1.0 / FPS
 
-        self.state = self._render("state_pixels")
+        self.my_reward = 0
+        self.state, data = self._render("state_pixels")
 
         step_reward = 0
         terminated = False
@@ -587,7 +622,12 @@ class CarRacing(gym.Env, EzPickle):
 
         if self.render_mode == "human":
             self.render()
-        return self.state, step_reward, terminated, truncated, info
+
+        info["data"] = data
+        info["completed"] = self.achieved.sum()/len(self.road)
+
+        self.my_reward -= 0.1
+        return self.state, self.my_reward, terminated, truncated, info
 
     def render(self):
         if self.render_mode is None:
@@ -600,6 +640,27 @@ class CarRacing(gym.Env, EzPickle):
             return
         else:
             return self._render(self.render_mode)
+
+    #distance between a point and a line
+    @staticmethod
+    def point_2_line_distance(p, a, b):
+            if a == b:
+                return math.hypot(p[0] - a[0], p[1] - a[1])
+            numerator = abs((b[1]-a[1])*p[0] - (b[0]-a[0])*p[1] + b[0]*a[1] - b[1]*a[0])
+            denominator = math.hypot(b[0] - a[0], b[1] - a[1])
+            return numerator / denominator
+
+    @staticmethod
+    def normalize_angle(angle):
+            #normalize angle between -pi and pi
+            return math.atan2(math.sin(angle), math.cos(angle))
+
+    def get_kinematics(self):
+        acc = self.speed_over_frames[1] - self.speed_over_frames[0]
+        angular_velocity_past = self.normalize_angle(self.angle_over_frames[1] - self.angle_over_frames[0])
+        angular_velocity_present = self.normalize_angle(self.angle_over_frames[2] - self.angle_over_frames[1])
+        angular_acceleration = (angular_velocity_present-angular_velocity_past)/2
+        return acc, angular_velocity_present, angular_acceleration
 
     def _render(self, mode: str):
         assert mode in self.metadata["render_modes"]
@@ -627,7 +688,7 @@ class CarRacing(gym.Env, EzPickle):
         trans = pygame.math.Vector2((scroll_x, scroll_y)).rotate_rad(angle)
         trans = (WINDOW_W / 2 + trans[0], WINDOW_H / 4 + trans[1])
 
-        self._render_road(zoom, trans, angle)
+        data = self._render_road(zoom, trans, angle)
         self.car.draw(
             self.surf,
             zoom,
@@ -635,6 +696,7 @@ class CarRacing(gym.Env, EzPickle):
             angle,
             mode not in ["state_pixels_list", "state_pixels"],
         )
+        self._draw_point(self.surf, (self.car.hull.position[0], self.car.hull.position[1]), (255,255,255), zoom, trans, angle)
 
         self.surf = pygame.transform.flip(self.surf, False, True)
 
@@ -654,12 +716,13 @@ class CarRacing(gym.Env, EzPickle):
             self.screen.fill(0)
             self.screen.blit(self.surf, (0, 0))
             pygame.display.flip()
+            return data
         elif mode == "rgb_array":
-            return self._create_image_array(self.surf, (VIDEO_W, VIDEO_H))
+            return self._create_image_array(self.surf, (VIDEO_W, VIDEO_H)), data
         elif mode == "state_pixels":
-            return self._create_image_array(self.surf, (STATE_W, STATE_H))
+            return self._create_image_array(self.surf, (STATE_W, STATE_H)), data
         else:
-            return self.isopen
+            return self.isopen, data
 
     def _render_road(self, zoom, translation, angle):
         bounds = PLAYFIELD
@@ -692,12 +755,146 @@ class CarRacing(gym.Env, EzPickle):
                 self.surf, poly, self.grass_color, zoom, translation, angle
             )
 
-        # draw road
-        for poly, color in self.road_poly:
-            # converting to pixel coordinates
+        #used to track covererd track tiles
+        if self.achieved is None:
+            self.achieved = np.zeros((len(self.road_poly)))
+
+        #store index of track tile the car is currently on
+        #When not on a tile, it equals None
+        current_polygon_index = None
+        #information on track tile the car is closest to
+        closest_tile = {"index": None, "dist": None, "center": None}
+
+        car_pos = (self.car.hull.position[0], self.car.hull.position[1])
+        car_point = shapely.geometry.Point(car_pos)
+        track_tile_index = 0 #road poly contains both track tiles and kerbstones, so we use this to know what track tile we're on
+        #Loop through all track tiles and find closest as well as current track tile, if on track
+        for i, (poly, color) in enumerate(self.road_poly):
             poly = [(p[0], p[1]) for p in poly]
             color = [int(c) for c in color]
             self._draw_colored_polygon(self.surf, poly, color, zoom, translation, angle)
+            self._draw_point(self.surf, poly[0], (255,255,255), zoom, translation, angle)
+            if color!= [255,255,255] and color != [255,0,0]:
+                is_kerbstone = False
+            else:
+                is_kerbstone = True
+                continue
+
+            #if the polgon is not a kerbstone, we check the distance
+            polygon = shapely.geometry.Polygon(poly)
+            dist = polygon.distance(car_point)
+            if (closest_tile["index"] == None or dist < closest_tile["dist"]):
+                closest_tile["index"] = track_tile_index
+                closest_tile["dist"] = dist
+                closest_tile["center"] = (polygon.centroid.x, polygon.centroid.y)
+            #we check if we are inside the track tile
+            if polygon.contains(car_point):
+                current_polygon_index = track_tile_index
+                if(self.achieved[i] == 0):
+                    self.achieved[i] = 1
+                    self.my_reward = 1000/len(self.track_tile_vertices)
+
+            track_tile_index += 1
+
+        #if off track, we want to use the closest tile to compute relative car position and angle
+        off_track = False
+        if(current_polygon_index==None):
+            current_polygon_index = closest_tile["index"]
+            off_track = True
+
+        #this will hold the center of the current(or closest) track tile
+        # and the track tile that is 5 tiles ahead
+        key_points = []
+
+        #color current tile (or closest tile, if outside track) black
+        poly = self.track_tile_vertices[current_polygon_index]
+        self._draw_colored_polygon(self.surf, poly, (0,0,0), zoom, translation, angle)
+        self._draw_point(self.surf, closest_tile["center"], (255,255,255), zoom, translation, angle)
+        key_points.append(closest_tile["center"])
+
+        #color 5th tile from current tile blue
+        poly_next = self.track_tile_vertices[(current_polygon_index+5)%len(self.track_tile_vertices)]
+        self._draw_colored_polygon(self.surf, poly_next, (0,0,255), zoom, translation, angle)
+        polygon_center = shapely.geometry.Polygon(poly_next).centroid
+        self._draw_point(self.surf, (polygon_center.x, polygon_center.y), (255,255,255), zoom, translation, angle)
+        key_points.append((polygon_center.x, polygon_center.y))
+
+        colours = [(255,255,255), (255, 0, 0), (0, 255, 0), (0, 0, 255)]
+
+        c = poly
+        #midpoint of the right edge of the track
+        midpoint_right = ((c[1][0]+c[2][0])/2, (c[1][1]+c[2][1])/2)
+        self._draw_point(self.surf, midpoint_right, colours[0], zoom, translation, angle)
+        
+        #midpoint of the left edge of the track
+        midpoint_left = ((c[0][0]+c[3][0])/2, (c[0][1]+c[3][1])/2)
+        self._draw_point(self.surf, midpoint_left, colours[1], zoom, translation, angle)
+
+        #midpoint of the top edge of the track
+        midpoint_top = ((c[0][0]+c[1][0])/2, (c[0][1]+c[1][1])/2)
+        self._draw_point(self.surf, midpoint_top, colours[2], zoom, translation, angle)
+
+        #midpoint of the bottom edge of the track
+        midpoint_bottom = ((c[2][0]+c[3][0])/2, (c[2][1]+c[3][1])/2)
+        self._draw_point(self.surf, midpoint_bottom, colours[3], zoom, translation, angle)
+
+        #distance to the right edge of the track
+        dist_2_right_track = self.point_2_line_distance(car_pos, c[1], c[2])
+        #distance to the left edge of the track
+        dist_2_left_track = self.point_2_line_distance(car_pos, c[0], c[3])
+        #distance to the center line of the track
+        dist_2_center_track = self.point_2_line_distance(car_pos, midpoint_top, midpoint_bottom)
+
+        #ensure that the distance to the center line is signed
+        if(dist_2_left_track < dist_2_right_track):
+            dist_2_center_track *= -1
+
+        #normalize distance based on track width
+        # norms should be equal as long the sides of the track are parallel but we'll just leave the conditional in
+        if off_track:
+            norm = math.hypot(midpoint_right[0] - midpoint_left[0], midpoint_right[1] - midpoint_left[1])
+        else:
+            norm = dist_2_left_track + dist_2_right_track
+        dist_2_left_track /= norm
+        dist_2_center_track /= norm
+        dist_2_right_track /= norm
+
+        car_speed = np.sqrt(
+            np.square(self.car.hull.linearVelocity[0])
+            + np.square(self.car.hull.linearVelocity[1])
+        )
+        self.speed_over_frames.append(car_speed)
+        car_angle = self.normalize_angle(self.car.hull.angle)
+        self.angle_over_frames.append(car_angle)
+
+        #if we only have one angle, fill up the deque
+        if(len(self.angle_over_frames) == 1):
+            self.angle_over_frames.append(car_angle)
+            self.angle_over_frames.append(car_angle)
+
+        #get acceleration, angular velocity and angular acceleration using the deques
+        acc, ang_vel, ang_acc = self.get_kinematics()
+
+        cos_theta = np.cos(-car_angle)
+        sin_theta = np.sin(-car_angle)
+
+        self._draw_line(self.surf, key_points[0], key_points[1], (0,255,0), zoom, translation, angle)
+
+        #key points (current tile center point, 5th tile ahead, center point) rotated to car's frame
+        key_points_cf = [[p[0]*cos_theta - p[1]*sin_theta,
+                                p[0]*sin_theta + p[1]*cos_theta] 
+                                for p in key_points]
+        #get angle of line between the two points
+        line_angle = math.atan2(key_points_cf[1][1]-key_points_cf[0][1], key_points_cf[1][0]-key_points_cf[0][0])
+        #it turns out that we need to subtract 90 degrees from the line angle so the car is facing forward
+        #this is the angle of the road trajectory relative to the car
+        car_relative_angle = self.normalize_angle(line_angle - math.radians(90))
+        car_relative_sin = math.sin(car_relative_angle)
+        car_relative_cos = math.cos(car_relative_angle)
+        
+        #the trailing 0 is unneccessary, I was intending on using it but it turns out that we don't need it
+        return (int(off_track), car_speed, acc, ang_vel, ang_acc, car_relative_sin, car_relative_cos, 
+                dist_2_left_track, dist_2_center_track, dist_2_right_track, 0)
 
     def _render_indicators(self, W, H):
         s = W / 40.0
@@ -786,6 +983,44 @@ class CarRacing(gym.Env, EzPickle):
         ):
             gfxdraw.aapolygon(self.surf, poly, color)
             gfxdraw.filled_polygon(self.surf, poly, color)
+
+    def _draw_point(
+        self, surface, point, color, zoom, translation, angle, clip=True
+    ):
+        point = pygame.math.Vector2(point).rotate_rad(angle)
+        point[0] = point[0] * zoom + translation[0]
+        point[1] = point[1] * zoom + translation[1]
+        if not clip or not (
+            -MAX_SHAPE_DIM <= point[0] <= WINDOW_W + MAX_SHAPE_DIM and
+            -MAX_SHAPE_DIM <= point[1] <= WINDOW_H + MAX_SHAPE_DIM
+        ):
+            return
+        
+        gfxdraw.aacircle(surface, int(point[0]), int(point[1]), 2, color)
+        gfxdraw.filled_circle(surface, int(point[0]), int(point[1]), 2, color)
+
+    def _draw_line(
+        self, surface, point1, point2, color, zoom, translation, angle, clip=True
+    ):
+        p1 = pygame.math.Vector2(point1).rotate_rad(angle)
+        p2 = pygame.math.Vector2(point2).rotate_rad(angle)
+
+        p1[0] = p1[0] * zoom + translation[0]
+        p1[1] = p1[1] * zoom + translation[1]
+
+        p2[0] = p2[0] * zoom + translation[0]
+        p2[1] = p2[1] * zoom + translation[1]
+
+        if clip:
+            if (
+                p1[0] < -MAX_SHAPE_DIM and p2[0] < -MAX_SHAPE_DIM
+                or p1[0] > WINDOW_W + MAX_SHAPE_DIM and p2[0] > WINDOW_W + MAX_SHAPE_DIM
+                or p1[1] < -MAX_SHAPE_DIM and p2[1] < -MAX_SHAPE_DIM
+                or p1[1] > WINDOW_H + MAX_SHAPE_DIM and p2[1] > WINDOW_H + MAX_SHAPE_DIM
+            ):
+                return  # Both points are offscreen, skip drawing
+
+        pygame.gfxdraw.line(surface, int(p1[0]), int(p1[1]), int(p2[0]), int(p2[1]), color)
 
     def _create_image_array(self, screen, size):
         scaled_screen = pygame.transform.smoothscale(screen, size)
