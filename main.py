@@ -442,9 +442,9 @@ class Agent:
 
         q = g.dot(h_inverse_g)
 
-        lam = torch.sqrt(q/(2*self.delta)) #ATTENTION: Remember to show derivation of this
+        lam = torch.sqrt(q/(2*self.delta))
 
-        search_direction = (1/lam) * h_inverse_g
+        search_direction = (1/lam) * h_inverse_g #derivation shown in readme
       
         #see Appendix C of TRPO Paper
         #max_step_length = torch.sqrt(2*self.delta/search_direction.dot(self.A_fn(search_direction)))
