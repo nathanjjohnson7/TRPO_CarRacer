@@ -400,6 +400,7 @@ class Agent:
         for i in range(max_backtracks):
             diff = frac * step
             params_new = params + diff
+            #uncomment the line below, to skip line search
             #return params_new
 
             #trust region constraint check
