@@ -1,7 +1,9 @@
-# TRPO CarRacer
-Here, we have implemented Trust Region Policy Optimization for a modified version of the gymnasium car racing environment.
+# Tust Region Policy Optimzation - CarRacer
+Here, we have implemented Trust Region Policy Optimization (TRPO) for a modified version of the gymnasium car racing environment.
 
 Paper: https://arxiv.org/pdf/1502.05477
+
+TRPO is a policy gradient method with a trust region. It consists of an actor and critic. The critic is updated using gradient descent. We try to minimize the loss between the critic's value function predictions and the discounted rewards from the epsiode. The actor is updated by solving the lagrangian dual for a constrained optimization problem where we attempt to maximize the model’s performance in the environment while the KL divergence between the previous model's weights and new model weights don't exceed a certain threshold. This constraint defines the trust region, preventing overly large policy updates that could destabilize learning. We provide a detailed derivation of the actor update below. 
 
 Due to computational constraints, we have modified the environment to output an 11-dimensional feature vector at each step. The features are: an off-track flag, speed, acceleration, angular velocity, angular acceleration, sine of the car's angle relative to the road trajectory, cosine of the car's angle relative to the road trajectory, distance to the left edge of the track, distance to the center of the track, distance to the right edge of the track and an unused placeholder (always zero).
 <img width="2400" height="1500" alt="carracing_trpo_training_score_graph" src="https://github.com/user-attachments/assets/bad0d269-2f86-49ef-9203-857ac67d3298" />
