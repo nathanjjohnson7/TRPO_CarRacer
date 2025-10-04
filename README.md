@@ -32,7 +32,7 @@ We use a taylor approximation for both the objective, L, and the KL divergence t
 
 $$L_{\theta_{old}}(\theta) \approx g^T(\theta-\theta _k) $$
 
-where g is the gradient of the objective. The 0th term of the taylor approximation is 0 since the objective term is the advantage of $$\theta$$ over $$\theta_{old}$$ and the advantage of $$\theta_{old}$$ over $$\theta_{old}$$  is 0.
+where g is the gradient of the objective. The 0th term of the taylor approximation is 0 since the objective term is the advantage of $$\theta$$ over $$\theta_{old}$$, and the advantage of $$\theta_{old}$$ over $$\theta_{old}$$  is 0.
 
 $$D_{kl}(\theta||\theta _k) \approx \frac{1}{2} (\theta-\theta _k)^T H (\theta-\theta _k)$$
 
